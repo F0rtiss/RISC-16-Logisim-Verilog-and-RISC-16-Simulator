@@ -1,0 +1,104 @@
+`timescale 1ns/1ps
+
+module risc16_pipeline (
+    input clk,
+    input rst
+);
+    reg [15:0] pc;
+    reg [15:0] instr_mem [0:255];
+    reg [15:0] registers [0:7];
+
+    reg [15:0] IF_ID_instr;
+    reg [15:0] ID_EX_regA_val, ID_EX_regB_val, ID_EX_imm;
+    reg [2:0]  ID_EX_rd, ID_EX_rs, ID_EX_rt;
+    reg [3:0]  ID_EX_opcode;
+    reg        ID_EX_regWrite, ID_EX_aluSrc;
+
+    reg [15:0] EX_MEM_alu_out;
+    reg [2:0]  EX_MEM_rd;
+    reg        EX_MEM_regWrite;
+
+    reg [15:0] MEM_WB_alu_out;
+    reg [2:0]  MEM_WB_rd;
+    reg        MEM_WB_regWrite;
+
+    // --- FETCH ---
+    wire is_jump = (IF_ID_instr[15:12] == 4'b1100);
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            pc <= 0; IF_ID_instr <= 16'hF000;
+        end else if (is_jump) begin
+            pc <= {4'b0, IF_ID_instr[11:0]};
+            IF_ID_instr <= 16'hF000;
+        end else begin
+            pc <= pc + 1;
+            IF_ID_instr <= instr_mem[pc[7:0]];
+        end
+    end
+
+    // --- DECODE & WB-to-ID FORWARDING ---
+    wire [3:0] op = IF_ID_instr[15:12];
+    wire [2:0] rs_wire = IF_ID_instr[11:9];
+    wire [2:0] rt_wire = IF_ID_instr[8:6];
+    wire [2:0] rd_wire = (op == 4'b0001) ? rt_wire : IF_ID_instr[5:3];
+
+    // KRİTİK DÜZELTME: Register dosyasından okurken, o an WB aşamasında olan veriyi yakalamalıyız.
+    // Eğer okunacak register, o an yazılan register ile aynıysa güncel değeri al.
+    wire [15:0] reg_read_A = (MEM_WB_regWrite && (MEM_WB_rd != 0) && (MEM_WB_rd == rs_wire)) ? MEM_WB_alu_out : registers[rs_wire];
+    wire [15:0] reg_read_B = (MEM_WB_regWrite && (MEM_WB_rd != 0) && (MEM_WB_rd == rt_wire)) ? MEM_WB_alu_out : registers[rt_wire];
+
+    always @(posedge clk or posedge rst) begin
+        if (rst || is_jump) begin
+            {ID_EX_regWrite, ID_EX_aluSrc, ID_EX_rd, ID_EX_rs, ID_EX_rt} <= 0;
+            ID_EX_opcode <= 4'hF;
+        end else begin
+            ID_EX_opcode   <= op;
+            ID_EX_rs       <= rs_wire;
+            ID_EX_rt       <= rt_wire;
+            ID_EX_rd       <= rd_wire;
+            ID_EX_regWrite <= (op == 4'b0000 || op == 4'b0001);
+            ID_EX_aluSrc   <= (op == 4'b0001);
+            ID_EX_regA_val <= reg_read_A;
+            ID_EX_regB_val <= reg_read_B;
+            ID_EX_imm      <= {10'b0, IF_ID_instr[5:0]};
+        end
+    end
+
+    // --- EXECUTE & EX-to-EX FORWARDING ---
+    wire [15:0] fwd_A = (EX_MEM_regWrite && (EX_MEM_rd != 0) && (EX_MEM_rd == ID_EX_rs)) ? EX_MEM_alu_out :
+                        (MEM_WB_regWrite && (MEM_WB_rd != 0) && (MEM_WB_rd == ID_EX_rs)) ? MEM_WB_alu_out :
+                        ID_EX_regA_val;
+
+    wire [15:0] fwd_B = (EX_MEM_regWrite && (EX_MEM_rd != 0) && (EX_MEM_rd == ID_EX_rt)) ? EX_MEM_alu_out :
+                        (MEM_WB_regWrite && (MEM_WB_rd != 0) && (MEM_WB_rd == ID_EX_rt)) ? MEM_WB_alu_out :
+                        ID_EX_regB_val;
+
+    wire [15:0] operand_B = ID_EX_aluSrc ? ID_EX_imm : fwd_B;
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            EX_MEM_alu_out <= 0; EX_MEM_rd <= 0; EX_MEM_regWrite <= 0;
+        end else begin
+            EX_MEM_alu_out <= fwd_A + operand_B;
+            EX_MEM_rd <= ID_EX_rd;
+            EX_MEM_regWrite <= ID_EX_regWrite;
+        end
+    end
+
+    // --- WRITE BACK ---
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            MEM_WB_alu_out <= 0; MEM_WB_rd <= 0; MEM_WB_regWrite <= 0;
+        end else begin
+            MEM_WB_alu_out <= EX_MEM_alu_out;
+            MEM_WB_rd <= EX_MEM_rd;
+            MEM_WB_regWrite <= EX_MEM_regWrite;
+        end
+    end
+
+    integer i;
+    always @(posedge clk or posedge rst) begin
+        if (rst) for(i=0; i<8; i=i+1) registers[i] <= 0;
+        else if (MEM_WB_regWrite && MEM_WB_rd != 0) registers[MEM_WB_rd] <= MEM_WB_alu_out;
+    end
+endmodule

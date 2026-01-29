@@ -1,0 +1,49 @@
+`timescale 1ns/1ps
+
+module tb_risc16;
+    reg clk, rst;
+    risc16_pipeline uut (.clk(clk), .rst(rst));
+
+    always #5 clk = ~clk;
+
+    initial begin
+        $dumpfile("combined_test.vcd");
+        $dumpvars(0, tb_risc16);
+
+        for (integer i=0; i<256; i=i+1) uut.instr_mem[i] = 16'hF000;
+
+        clk = 0; rst = 1;
+
+        /** TEST PLANI:
+         * Adres 0: ADDI R1, R0, 100 -> R1 = 100
+         * Adres 1: ADDI R2, R0, -10 -> R2 = -10 (6-bit -10: 110110)
+         * Adres 2: JUMP to 5
+         * Adres 5: ADD R3, R1, R2   -> R3 = 100 - 10 = 90
+         * Adres 6: ADD R3, R3, R3   -> R3 = 90 + 90 = 180
+         */
+
+        // R1 = 100 (ADDI R1, R0, 100) -> 100, 6 bite sığmaz!
+        // 6-bit max 31'dir. O yüzden 30 ve 70 yapalım.
+
+        uut.instr_mem[0] = 16'b0001_000_001_011110; // R1 = 30
+        uut.instr_mem[1] = 16'b0001_000_010_010100; // R2 = 20
+        uut.instr_mem[2] = 16'b1100_000000000101;    // JUMP 5
+        uut.instr_mem[5] = 16'b0000_001_010_011_000; // R3 = R1 + R2 (50)
+        uut.instr_mem[6] = 16'b0000_011_011_011_000; // R3 = R3 + R3 (100)
+
+        #20 rst = 0;
+        #500;
+
+        $display("--- STRESS TEST SONUCLARI ---");
+        $display("R1: %d (Beklenen: 30)", uut.registers[1]);
+        $display("R2: %d (Beklenen: 20)", uut.registers[2]);
+        $display("R3: %d (Beklenen: 100)", uut.registers[3]);
+
+        if (uut.registers[3] == 100)
+            $display("SONUC: MUHTESEM! Kendi kendine toplama (R3+R3) basarili.");
+        else
+            $display("SONUC: HATALI! R3 = %d", uut.registers[3]);
+
+        $finish;
+    end
+endmodule
